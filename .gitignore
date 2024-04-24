@@ -1,0 +1,7 @@
+bin
+pkg
+*.sw?
+*.py?
+vendor
+.DS_Store
+testlogs
