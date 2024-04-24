@@ -15,6 +15,17 @@ type tailLine struct {
 	line     *tail.Line
 }
 
+type keywords []string
+
+func (kws *keywords) String() string {
+	return "[" + strings.Join([]string(*kws), ", ") + "]"
+}
+
+func (kws *keywords) Set(v string) error {
+	*kws = append(*kws, v)
+	return nil
+}
+
 const (
 	Reset   = "\033[0m"
 	Red     = "\033[31m"
@@ -37,10 +48,11 @@ var (
 
 func main() {
 	var (
-		keyword, fileStyle string
-		colorName          bool
+		kws       keywords
+		fileStyle string
+		colorName bool
 	)
-	flag.StringVar(&keyword, "keyword", "", "要过滤的关键词")
+	flag.Var(&kws, "keyword", "要过滤的关键词")
 	flag.StringVar(&fileStyle, "filestyle", "base", "文件名显示样式，none/base/full")
 	flag.BoolVar(&colorName, "colorName", true, "是否用颜色显示文件名")
 	flag.Parse()
@@ -56,15 +68,19 @@ func main() {
 	for _, filename := range flag.Args() {
 		go startTail(filename, lc)
 	}
-	if keyword == "" {
+	if len(kws) == 0 {
 		for l := range lc {
 			fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
 		}
 	} else {
+	iterline:
 		for l := range lc {
-			if strings.Contains(l.line.Text, keyword) {
-				fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
+			for _, kw := range kws {
+				if !strings.Contains(l.line.Text, kw) {
+					continue iterline
+				}
 			}
+			fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
 		}
 	}
 }
