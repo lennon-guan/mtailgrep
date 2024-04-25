@@ -13,12 +13,13 @@ import (
 	"github.com/samber/lo"
 )
 
-type tailLine struct {
-	filename string
-	line     *tail.Line
-}
-
-type keywords []string
+type (
+	tailLine struct {
+		filename string
+		line     *tail.Line
+	}
+	keywords []string
+)
 
 func (kws *keywords) String() string {
 	return "[" + strings.Join([]string(*kws), ", ") + "]"
@@ -134,6 +135,22 @@ func startTail(filename string, whence int, lc chan tailLine) {
 	}
 }
 
+func fqlMatch(env any, p string) (any, error) {
+	re, ok := fqlReMap[p]
+	if !ok {
+		var err error
+		re, err = regexp.Compile(p)
+		if err != nil {
+			return false, err
+		}
+		fqlReMap[p] = re
+	}
+	if re == nil {
+		return false, nil
+	}
+	return re.MatchString(env.(string)), nil
+}
+
 var (
 	fqlReMap  = map[string]*regexp.Regexp{}
 	fqlConfig = filterql.ParseConfig{
@@ -141,20 +158,12 @@ var (
 			"keyword": func(env any, kw string) (any, error) {
 				return strings.Contains(env.(string), kw), nil
 			},
-			"match": func(env any, p string) (any, error) {
-				re, ok := fqlReMap[p]
-				if !ok {
-					var err error
-					re, err = regexp.Compile(p)
-					if err != nil {
-						return false, err
-					}
-					fqlReMap[p] = re
-				}
-				if re == nil {
-					return false, nil
-				}
-				return re.MatchString(env.(string)), nil
+			"ikeyword": func(env any, kw string) (any, error) {
+				return strings.Contains(strings.ToLower(env.(string)), strings.ToLower(kw)), nil
+			},
+			"match": fqlMatch,
+			"imatch": func(env any, p string) (any, error) {
+				return fqlMatch(env, "(?i)"+p)
 			},
 		},
 		IntMethods: map[string]func(any, int) (any, error){},
