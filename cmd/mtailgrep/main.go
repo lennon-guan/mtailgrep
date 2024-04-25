@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/lennon-guan/filterql"
 	"github.com/nxadm/tail"
+	"github.com/samber/lo"
 )
 
 type tailLine struct {
@@ -38,61 +41,90 @@ const (
 	White   = "\033[97m"
 )
 
-var (
-	filenameProcFunc = map[string]func(string) string{
-		"none": func(string) string { return "" },
-		"base": func(f string) string { return filepath.Base(f) },
-		"full": func(f string) string { return f },
-	}
-)
-
 func main() {
 	var (
-		kws       keywords
-		fileStyle string
-		colorName bool
+		kwList, reList keywords
+		whenceName     string
+		fileStyle      string
+		filter         string
+		filterCond     filterql.BoolAst
+		err            error
+		colorName      bool
 	)
-	flag.Var(&kws, "keyword", "要过滤的关键词")
+	flag.Var(&kwList, "keyword", "要过滤的关键词")
+	flag.Var(&reList, "re", "要过滤的正则表达式")
+	flag.StringVar(&filter, "filter", "", "过滤消息用的filterql")
+	flag.StringVar(&whenceName, "whence", "end", "开始tail的文件位置，start/current/end")
 	flag.StringVar(&fileStyle, "filestyle", "base", "文件名显示样式，none/base/full")
 	flag.BoolVar(&colorName, "colorName", true, "是否用颜色显示文件名")
 	flag.Parse()
-	fpf := filenameProcFunc[fileStyle]
-	if fpf == nil {
-		panic("unsupported file style " + fileStyle)
-	}
+	fpf := lo.Switch[string, func(string) string](fileStyle).
+		Case("none", func(string) string { return "" }).
+		Case("base", func(f string) string { return filepath.Base(f) }).
+		Case("full", func(f string) string { return f }).
+		DefaultF(func() func(string) string {
+			panic("unsupported file style " + fileStyle)
+			return nil
+		})
+	whence := lo.Switch[string, int](whenceName).
+		Case("start", io.SeekStart).
+		Case("current", io.SeekCurrent).
+		Case("end", io.SeekEnd).
+		DefaultF(func() int {
+			panic("unsupported whence " + whenceName)
+			return -1
+		})
 	outputFmt := "%s:%s\n"
 	if colorName && fileStyle != "none" {
 		outputFmt = "\033[32m%s\033[0m:%s\n"
 	}
+	regexps := make([]*regexp.Regexp, len(reList))
+	for i, re := range reList {
+		regexps[i] = regexp.MustCompile(re)
+	}
+	if filter != "" {
+		if filterCond, err = filterql.Parse(filter, &fqlConfig); err != nil {
+			panic(err)
+		}
+	}
 	lc := make(chan tailLine)
 	for _, filename := range flag.Args() {
-		go startTail(filename, lc)
+		go startTail(filename, whence, lc)
 	}
-	if len(kws) == 0 {
-		for l := range lc {
-			fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
-		}
-	} else {
-	iterline:
-		for l := range lc {
-			for _, kw := range kws {
-				if !strings.Contains(l.line.Text, kw) {
-					continue iterline
-				}
+	fqlCtx := filterql.NewContext(nil)
+iterline:
+	for l := range lc {
+		for _, kw := range kwList {
+			if !strings.Contains(l.line.Text, kw) {
+				continue iterline
 			}
-			fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
 		}
+		for _, re := range regexps {
+			if !re.MatchString(l.line.Text) {
+				continue iterline
+			}
+		}
+		if filterCond != nil {
+			fqlCtx.Env = l.line.Text
+			if matched, err := filterCond.IsTrue(fqlCtx); err != nil {
+				panic(err)
+			} else if !matched {
+				continue iterline
+			}
+		}
+		fmt.Printf(outputFmt, fpf(l.filename), l.line.Text)
 	}
 }
 
-func startTail(filename string, lc chan tailLine) {
+func startTail(filename string, whence int, lc chan tailLine) {
 	t, err := tail.TailFile(filename, tail.Config{
 		Follow: true,
 		ReOpen: true,
 		Location: &tail.SeekInfo{
-			Whence: io.SeekEnd,
+			Whence: whence,
 			Offset: 0,
 		},
+		Logger: tail.DiscardingLogger,
 	})
 	if err != nil {
 		panic(err)
@@ -101,3 +133,30 @@ func startTail(filename string, lc chan tailLine) {
 		lc <- tailLine{filename: filename, line: line}
 	}
 }
+
+var (
+	fqlReMap  = map[string]*regexp.Regexp{}
+	fqlConfig = filterql.ParseConfig{
+		StrMethods: map[string]func(any, string) (any, error){
+			"keyword": func(env any, kw string) (any, error) {
+				return strings.Contains(env.(string), kw), nil
+			},
+			"match": func(env any, p string) (any, error) {
+				re, ok := fqlReMap[p]
+				if !ok {
+					var err error
+					re, err = regexp.Compile(p)
+					if err != nil {
+						return false, err
+					}
+					fqlReMap[p] = re
+				}
+				if re == nil {
+					return false, nil
+				}
+				return re.MatchString(env.(string)), nil
+			},
+		},
+		IntMethods: map[string]func(any, int) (any, error){},
+	}
+)
